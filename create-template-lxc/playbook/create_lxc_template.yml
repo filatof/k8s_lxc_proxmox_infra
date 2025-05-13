@@ -1,0 +1,245 @@
+- name: Build and Start Container
+  hosts: proxmox-1
+  gather_facts: true
+  tasks:
+    - name: Remove existing container if any
+      community.general.proxmox:
+        vmid: "{{ lxc_id }}"
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ ansible_host }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Load overlay module if not loaded
+      ansible.builtin.shell: modprobe overlay
+      when: ansible_facts.modules is not defined or 'overlay' not in ansible_facts.modules
+      register: overlay_mod
+      changed_when: overlay_mod.rc == 0
+
+    - name: Load br_netfilter module if not loaded
+      ansible.builtin.shell: modprobe br_netfilter
+      when: ansible_facts.modules is not defined or 'br_netfilter' not in ansible_facts.modules
+      register: br_mod
+      changed_when: br_mod.rc == 0
+
+    - name: Create container with specific config
+      community.general.proxmox:
+        api_host: "{{ ansible_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        node: "{{ proxmox_node }}"
+        hostname: "{{ lxc_hostname }}"
+        vmid: "{{ lxc_id }}"
+        cores: 2
+        memory: 2048
+        swap: 0
+        password: "{{ lxc_password }}"
+        unprivileged: false
+        pubkey: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+        disk_volume:
+          storage: "{{ lxc_storage }}"
+          size: 20
+        ostemplate: "{{ template_storage }}:vztmpl/{{ lxc_template }}"
+        netif:
+          net0: "name=eth0,gw={{ lxc_gateway }},ip={{ lxc_ip }},bridge={{ lxc_network }}"
+        features:
+          - nesting=1
+        state: present
+        timeout: 300
+
+    - name: Set custom LXC config for Kubernetes compatibility
+      ansible.builtin.blockinfile:
+        path: /etc/pve/lxc/5510.conf
+        block: |
+          lxc.apparmor.profile: unconfined
+          lxc.cap.drop:
+          lxc.cgroup2.devices.allow: a
+          lxc.mount.auto: proc:rw sys:rw
+          lxc.mount.entry: /dev/console dev/kmsg none bind,create=file
+        marker: "# {mark} ANSIBLE MANAGED"
+
+    - name: Wait for container build to settle
+      ansible.builtin.wait_for:
+        timeout: 10
+      delegate_to: localhost
+
+    - name: Start the container
+      community.general.proxmox:
+        api_host: "{{ ansible_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        node: "{{ proxmox_node }}"
+        hostname: "{{ lxc_hostname }}"
+        state: started
+        unprivileged: no
+
+    - name: Wait for container to start
+      ansible.builtin.wait_for:
+        timeout: 10
+      delegate_to: localhost
+  tags: create
+
+- name: Install Required Packages and Configure Node
+  hosts: lxc
+  gather_facts: true
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install system packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - openssh-server
+        - curl
+        - jq
+        - wget
+        - bash-completion
+        - unzip
+        - gnupg
+        - git
+      loop_control:
+        label: "Installing {{ item }}"
+
+    - name: Detect host architecture
+      set_fact:
+        arch: >-
+          {{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else
+              'amd64' if ansible_architecture in ['x86_64', 'amd64'] else 'unsupported' }}
+
+    - name: Fail if architecture is unsupported
+      fail:
+        msg: "Unsupported architecture: {{ ansible_architecture }}"
+      when: arch == 'unsupported'
+
+    - name: Get latest containerd version
+      shell: curl -s https://api.github.com/repos/containerd/containerd/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: containerd_version
+      changed_when: false
+
+    - name: Get latest runc version
+      shell: curl -s https://api.github.com/repos/opencontainers/runc/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: runc_version
+      changed_when: false
+
+    - name: Get latest CNI plugins version
+      shell: curl -s https://api.github.com/repos/containernetworking/plugins/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: cni_version
+      changed_when: false
+
+    - name: Install containerd
+      shell: |
+        curl -LO https://github.com/containerd/containerd/releases/download/v{{ containerd_version.stdout }}/containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+        tar -C /usr/local -xzf containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+        rm -f containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+      args:
+        executable: /bin/bash
+
+    - name: Install containerd systemd service
+      get_url:
+        url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+        dest: /usr/lib/systemd/system/containerd.service
+      notify: Restart containerd
+
+    - name: Enable and start containerd service
+      systemd:
+        name: containerd
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Install runc
+      shell: |
+        curl -LO https://github.com/opencontainers/runc/releases/download/v{{ runc_version.stdout }}/runc.{{ arch }}
+        install -m 755 runc.{{ arch }} /usr/local/sbin/runc
+        rm -f runc.{{ arch }}
+      args:
+        executable: /bin/bash
+
+    - name: Install CNI plugins
+      shell: |
+        curl -LO https://github.com/containernetworking/plugins/releases/download/v{{ cni_version.stdout }}/cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+        mkdir -p /opt/cni/bin
+        tar -C /opt/cni/bin -xzf cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+        rm -f cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+      args:
+        executable: /bin/bash
+
+    - name: Create user fill
+      ansible.builtin.user:
+        name: fill
+        groups: sudo
+        append: yes
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Allow passwordless sudo for fill
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/fill
+        content: "fill ALL=(ALL:ALL) NOPASSWD:ALL"
+        mode: "0440"
+        owner: root
+        group: root
+        validate: "visudo -cf %s"
+
+    - name: Ensure .ssh directory exists for fill
+      ansible.builtin.file:
+        path: /home/fill/.ssh
+        state: directory
+        owner: fill
+        group: fill
+        mode: "0700"
+
+    - name: Add SSH keys for fill user
+      ansible.builtin.authorized_key:
+        user: fill
+        state: present
+        key: |
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL+O6cXczlSLnL0wZSMe6qRNKpfbdiG6BtYwCmvi5ctR fill@Macmini.local
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlPFhFwKepToM3D/5wgUfFsPsv99sZkfUr9gnuhYYr/ fill@MacBookAir.local
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN6DtL2KzXFUB43Z4LZrqLMc7YY2rlAUjtCl6EpycHBq Generated By Termius
+
+    - name: Enable IP forwarding and bridge settings for Kubernetes
+      copy:
+        dest: /etc/sysctl.d/10-k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+      notify: Reload sysctl
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload sysctl
+      shell: sysctl -f /etc/sysctl.d/10-k8s.conf
+
+- name: Convert Container to Template
+  hosts: proxmox-1
+  gather_facts: false
+  tasks:
+    - name: Stop container before conversion
+      community.general.proxmox:
+        vmid: 5510
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: pimox
+        state: stopped
+
+    - name: Convert container to template
+      community.general.proxmox:
+        vmid: 5510
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: pimox
+        state: template
+        force: true
+  tags: template
+

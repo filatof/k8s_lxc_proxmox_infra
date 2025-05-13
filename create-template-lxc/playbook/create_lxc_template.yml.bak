@@ -1,0 +1,213 @@
+---
+- name: Build & Start Container
+  hosts: proxmox-1
+  gather_facts: true
+  tasks:
+    - name: Remove container
+      community.general.proxmox:
+        vmid: "{{ lxc_id }}"
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ ansible_host }}"
+        state: absent
+      ignore_errors: true
+    - name: Create container...
+      community.general.proxmox:
+        api_host: "{{ ansible_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        node: "{{ proxmox_node }}"
+        hostname: "{{ lxc_hostname }}"
+        vmid: "{{ lxc_id }}"
+        cores: 2
+        memory: 2048
+        swap: 0
+        password: "{{ lxc_password }}"
+        unprivileged: false
+        pubkey: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+        disk_volume:  
+          storage: "{{ lxc_storage }}" 
+          size: 20  
+        ostemplate: "{{ template_storage }}:vztmpl/{{ lxc_template }}"
+        netif:
+          net0: "name=eth0,gw={{ lxc_gateway }},ip={{ lxc_ip }},bridge={{ lxc_network }}"
+        features:
+          - nesting=1
+        state: present
+    - name: Wait for container to build...
+      ansible.builtin.wait_for:
+        timeout: 10
+      delegate_to: localhost
+    - name: Start the container...
+      community.general.proxmox:
+        api_host: "{{ ansible_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        node: "{{ proxmox_node }}"
+        hostname: "{{ lxc_hostname }}"
+        state: started
+        unprivileged: no
+    - name: Wait for the container to start...
+      ansible.builtin.wait_for:
+        timeout: 10
+      delegate_to: localhost
+  tags: create
+
+- name: Install App
+  hosts: lxc
+  gather_facts: true
+  tasks:
+    - name: Package update cache...
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install apt packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - openssh-server
+        - curl
+        - jq
+        - wget
+        - bash-completion
+        - unzip
+        - gnupg
+        - git
+      loop_control:
+        label: "Installing {{ item }}"
+    
+    - name: Detect architecture host
+      set_fact:
+        arch: >-
+          {{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else
+              'amd64' if ansible_architecture in ['x86_64', 'amd64'] else 'unsupported' }}
+
+    - name: Прерывание, если архитектура не поддерживается
+      fail:
+        msg: "Неподдерживаемая архитектура: {{ ansible_architecture }}"
+      when: arch == 'unsupported'
+
+    - name: Получение последней версии containerd
+      shell: |
+        curl -s https://api.github.com/repos/containerd/containerd/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: containerd_version
+      changed_when: false
+
+    - name: Получение последней версии runc
+      shell: |
+        curl -s https://api.github.com/repos/opencontainers/runc/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: runc_version
+      changed_when: false
+
+    - name: Получение последней версии CNI plugins
+      shell: |
+        curl -s https://api.github.com/repos/containernetworking/plugins/releases/latest | jq -r .tag_name | sed 's/^v//'
+      register: cni_version
+      changed_when: false
+
+    - name: Загрузка и установка containerd
+      shell: |
+        curl -LO https://github.com/containerd/containerd/releases/download/v{{ containerd_version.stdout }}/containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+        tar -C /usr/local -xzf containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+        rm -f containerd-{{ containerd_version.stdout }}-linux-{{ arch }}.tar.gz
+      args:
+        executable: /bin/bash
+
+    - name: Установка systemd unit-файла для containerd
+      get_url:
+        url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+        dest: /usr/lib/systemd/system/containerd.service
+      notify: Перезапустить containerd
+
+    - name: Отключаем ExecStartPre modprobe overlay
+      lineinfile:
+        path: /usr/lib/systemd/system/containerd.service
+        regexp: '^ExecStartPre=-/sbin/modprobe overlay'
+        line: '# ExecStartPre=-/sbin/modprobe overlay'
+
+    - name: Включение и запуск containerd
+      systemd:
+        name: containerd
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Загрузка и установка runc
+      shell: |
+        curl -LO https://github.com/opencontainers/runc/releases/download/v{{ runc_version.stdout }}/runc.{{ arch }}
+        install -m 755 runc.{{ arch }} /usr/local/sbin/runc
+        rm -f runc.{{ arch }}
+      args:
+        executable: /bin/bash
+
+    - name: Загрузка и установка CNI plugins
+      shell: |
+        curl -LO https://github.com/containernetworking/plugins/releases/download/v{{ cni_version.stdout }}/cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+        mkdir -p /opt/cni/bin
+        tar -C /opt/cni/bin -xzf cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+        rm -f cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
+      args:
+        executable: /bin/bash
+
+     
+    - name: Create user fill
+      ansible.builtin.user:
+        name: fill
+        groups: sudo
+        append: yes
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Allow sudo without password for fill
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/fill
+        content: "fill ALL=(ALL:ALL) NOPASSWD:ALL"
+        mode: "0440"
+        owner: root
+        group: root
+        validate: "visudo -cf %s"
+
+    - name: Ensure .ssh directory exists for fill
+      ansible.builtin.file:
+        path: /home/fill/.ssh
+        state: directory
+        owner: fill
+        group: fill
+        mode: "0700"
+
+    - name: Add SSH keys for fill
+      ansible.builtin.authorized_key:
+        user: fill
+        state: present
+        key: |
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL+O6cXczlSLnL0wZSMe6qRNKpfbdiG6BtYwCmvi5ctR fill@Macmini.local
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlPFhFwKepToM3D/5wgUfFsPsv99sZkfUr9gnuhYYr/ fill@MacBookAir.local
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN6DtL2KzXFUB43Z4LZrqLMc7YY2rlAUjtCl6EpycHBq Generated By Termius
+  handlers:
+    - name: Перезапустить containerd
+      systemd:
+        name: containerd
+        state: restarted  
+  tags: install_app
+
+- name: Convert to template
+  hosts: proxmox-1
+  gather_facts: false
+  tasks:
+    - name: Stop container
+      community.general.proxmox:
+        vmid: 5510
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: pimox
+        state: stopped
+    - name: Convert container to template (stop container if running)
+      community.general.proxmox:
+        vmid: 5510
+        api_user: root@pam
+        api_password: "{{ proxmox_api_password }}"
+        api_host: pimox
+        state: template
+        force: true
+  tags: template
