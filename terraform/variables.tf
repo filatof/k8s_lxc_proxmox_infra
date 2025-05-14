@@ -1,14 +1,15 @@
-variable "virtual_environment_endpoint" {
+variable "pm_api_url_prov" {
   type        = string
-  description = "The endpoint for the Proxmox Virtual Environment API (example: https://host:port)"
 }
 
-variable "virtual_environment_api_token" {
+variable "pm_user_prov" {
   type        = string
-  description = "The api roken the Proxmox Virtual Environment API (example: root@pam!for-terraform-provider=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
 }
 
-variable "ssh_public_key" {
+variable "pm_password_prov" {
   type        = string
-  description = "SSH Puclic key for VMs (example: ssh-rsa ...)"
+}
+
+variable "pass_host_lxc" {
+  type = string
 }

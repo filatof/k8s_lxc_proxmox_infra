@@ -1,75 +1,36 @@
-variable "vm_count" {
+variable "kube_count" {
   description = "Number of VMs to create"
-  default     = 5
+  default     = 6
 }
 
-resource "proxmox_virtual_environment_vm" "vm" {
-  count       = var.vm_count
-  name        = format("node-%02d", count.index + 1)
-  migrate     = true
-  description = "Managed by OpenTofu"
-  tags        = ["k8s"]
-  on_boot     = true
-  vm_id     = format("60%02d", count.index + 1)
+resource "proxmox_lxc" "kubernetes" {
+  count       = var.kube_count
+  target_node  = "pimox2"
+  hostname     = format("k8s-node-%02d", 1 + count.index)
+  arch = "arm64"
+  clone       = "5510"
+  full = true
+  password     = var.pass_host_lxc
+  cores = 4
+  memory = 4096
+  start = true
+  vmid = format("66%02d", count.index+101)
 
+  ssh_public_keys = <<-EOT
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL+O6cXczlSLnL0wZSMe6qRNKpfbdiG6BtYwCmvi5ctR fill@Macmini.local
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlPFhFwKepToM3D/5wgUfFsPsv99sZkfUr9gnuhYYr/ fill@MacBookAir.local
+  EOT
 
-  node_name = "pimox2"   
-
-  clone {
-    vm_id     = "5510"
-    retries   = 2
+  rootfs {
+    storage = "local"
+    size    = count.index < 6 ? "20G" : "70G"  # Для первых 3  по 20G , для остальных по 70G
   }
 
-  agent {
-    enabled = true
-  }
-
-  operating_system {
-    type = "l26"
-  }
-
-  cpu {
-    cores = 4
-    type  = "host"
-    numa  = true
-  }
-
-  memory {
-    dedicated = 4096
-  }
-
-  disk {
-    size         = "70"
-    interface    = "scsi0"
-    datastore_id = "local"
-    file_format  = "raw"
-  }
-
-  network_device {
+  network {
+    name   = "eth0"
     bridge = "vmbr0"
-    model  = "virtio"
-  }
-
-  initialization {
-    datastore_id = "local"
-    ip_config {
-      ipv4 {
-        #address = "dhcp"
-        address = format("192.168.1.%d/24", count.index + 101)
-        gateway = "192.168.1.1"
-      }
-    }
-    dns {
-      servers = [
-        "192.168.1.1",
-        "8.8.8.8"
-      ]
-    }
-    user_account {
-      username = "fill"
-      keys = [
-        var.ssh_public_key
-      ]
-    }
+    ip     = format("192.168.1.%d/24", count.index + 101)
+    gw     = "192.168.1.1"
+    type   = "veth"
   }
 }
