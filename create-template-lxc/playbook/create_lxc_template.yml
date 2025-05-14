@@ -1,11 +1,11 @@
 - name: Build and Start Container
-  hosts: proxmox-1
+  hosts: proxmox
   gather_facts: true
   tasks:
     - name: Remove existing container if any
       community.general.proxmox:
         vmid: "{{ lxc_id }}"
-        api_user: root@pam
+        api_user: "{{ proxmox_api_user }}"
         api_password: "{{ proxmox_api_password }}"
         api_host: "{{ ansible_host }}"
         state: absent
@@ -222,23 +222,23 @@
       shell: sysctl -f /etc/sysctl.d/10-k8s.conf
 
 - name: Convert Container to Template
-  hosts: proxmox-1
+  hosts: proxmox
   gather_facts: false
   tasks:
     - name: Stop container before conversion
       community.general.proxmox:
-        vmid: 5510
-        api_user: root@pam
+        vmid: "{{lxc_id}}"
+        api_user: "{{proxmox_api_user}}"
         api_password: "{{ proxmox_api_password }}"
-        api_host: pimox
+        api_host: "{{ proxmox_node }}"
         state: stopped
 
     - name: Convert container to template
       community.general.proxmox:
-        vmid: 5510
-        api_user: root@pam
+        vmid: "{{lxc_id}}"
+        api_user: "{{ proxmox_api_user}}"
         api_password: "{{ proxmox_api_password }}"
-        api_host: pimox
+        api_host: "{{ proxmox_node }}"
         state: template
         force: true
   tags: template
