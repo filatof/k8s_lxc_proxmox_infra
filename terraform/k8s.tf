@@ -3,8 +3,11 @@ variable "kube_count" {
   default     = 6
 }
 
+
 resource "proxmox_lxc" "kubernetes" {
   count       = var.kube_count
+  
+
   target_node  = "pimox2"
   hostname     = format("k8s-node-%02d", 1 + count.index)
   arch = "arm64"
