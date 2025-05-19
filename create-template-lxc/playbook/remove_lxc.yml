@@ -1,0 +1,32 @@
+- name: Remove LXC container
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    container_ids:
+      - 6610
+      - 6611
+      - 6612
+      - 6613
+      - 6614
+      - 6615
+  tasks:
+    - name: Stop conteiners
+      community.general.proxmox:
+        vmid: "{{ item }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ ansible_host }}"
+        force: true
+        state: stopped
+      with_items: "{{ container_ids }}"
+      ignore_errors: true
+
+    - name: Remove container
+      community.general.proxmox:
+        vmid: "{{ item }}"
+        node: "{{ proxmox_node }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ ansible_host }}"
+        state: absent
+      with_items: "{{ container_ids }}"
