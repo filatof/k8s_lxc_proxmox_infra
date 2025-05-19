@@ -1,0 +1,39 @@
+- name: Set variables for container
+  set_fact:
+    vmid: "{{ vmid_start + index }}"
+    ip: "{{ ip_start + index }}"
+    hostname: "k8s-node-{{ '%02d' | format(index + 1) }}"
+    disk_size: "{{ '20G' if index < 3 else '70G' }}"
+
+- name: Clone LXC container {{ hostname }}
+  community.general.proxmox:
+    vmid: "{{ vmid }}"
+    node: "{{ proxmox_node }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_password: "{{ proxmox_api_password }}"
+    api_host: "{{ ansible_host }}"
+    clone: "{{ lxc_id }}"
+    hostname: "{{ hostname }}"
+    clone_type: full
+    storage: "{{ storage }}"
+    disk: "{{ disk_size }}"
+
+- name: Update container configuration {{ hostname }}
+  community.general.proxmox:
+    vmid: "{{ vmid }}"
+    node: "{{ proxmox_node }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_password: "{{ proxmox_api_password }}"
+    api_host: "{{ ansible_host }}"
+    hostname: "{{ hostname }}"
+    netif:
+      net0: "name=eth0,gw={{ gateway }},ip=192.168.1.{{ ip }}/24,bridge={{ bridge }}"
+    update: true
+
+- name: Start container {{ hostname }}
+  community.general.proxmox:
+    vmid: "{{ vmid }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_password: "{{ proxmox_api_password }}"
+    api_host: "{{ ansible_host }}"
+    state: started
