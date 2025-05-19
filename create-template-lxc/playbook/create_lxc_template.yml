@@ -101,6 +101,8 @@
         - unzip
         - gnupg
         - git
+        - apt-transport-https
+        - ca-certificates
       loop_control:
         label: "Installing {{ item }}"
 
@@ -167,6 +169,49 @@
         rm -f cni-plugins-linux-{{ arch }}-v{{ cni_version.stdout }}.tgz
       args:
         executable: /bin/bash
+
+    - name: Create directory for Kubernetes keyring
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Kubernetes GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /"
+        state: present
+        filename: kubernetes
+
+    - name: install kubelet
+      ansible.builtin.apt:
+        name: kubelet
+        state: present
+        update_cache: true
+        force: yes
+
+    - name: install kubeadm
+      ansible.builtin.apt:
+        name: kubeadm
+        state: present
+        force: yes
+
+    - name: install kubectl
+      ansible.builtin.apt:
+        name: kubectl
+        state: present
+        force: yes
+    
+    - name: Restart service kubelet
+      ansible.builtin.systemd_service:
+        state: restarted
+        daemon_reload: true
+        name: kubelet
 
     - name: Create user fill
       ansible.builtin.user:
